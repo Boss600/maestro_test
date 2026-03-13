@@ -1,0 +1,7 @@
+Launch Settings.
+Find and tap on "Storage".
+Wait for the storage categories to load.
+Find the "System" category.
+Verify that "System" is visible and shows some storage usage info.
+Tap on "Other apps" or "Apps" if available to see the breakdown.
+Verify that a list of applications is displayed.

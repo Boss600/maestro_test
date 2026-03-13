@@ -1,0 +1,6 @@
+appId: ${APP_ID}
+---
+- scrollUntilVisible:
+    element:
+      text: "About (phone|emulated device)"
+- tapOn: "About (phone|emulated device)"

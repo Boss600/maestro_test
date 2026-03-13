@@ -1,0 +1,6 @@
+Use the 'about_phone.yaml' flow to get to the About Phone screen.
+Scroll to the very bottom to find "Legal information".
+Tap on "Legal information".
+Tap on "Third-party licenses".
+Wait for the list of licenses to load.
+Verify that some legal text is visible.

@@ -1,0 +1,5 @@
+Use the system_settings flow from the flows directory.
+Tap on "Languages & input" or "Languages".
+Tap on "Languages".
+Verify that the current system language (e.g., "English") is visible in the list.
+Take a screenshot named "System_Languages".

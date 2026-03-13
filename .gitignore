@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+*.tsbuildinfo
+
+# Logs
+logs/
+*.log
+
+# Maestro Outputs
+outputs/generated/
+outputs/screenshots/
+outputs/logs/
+
+# Secrets
+.env
+.env.local
+
+# OS Files
+.DS_Store
+Thumbs.db

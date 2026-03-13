@@ -1,0 +1,7 @@
+Launch Settings.
+Tap the search bar at the top (usually has text like "Search settings").
+Type "Font size".
+Wait for results to appear.
+Tap the result labeled "Font size".
+On the Display or Font size screen, verify that a preview text or "Font size" label is visible.
+Press the back button twice to return to the main Settings screen.

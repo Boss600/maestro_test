@@ -1,0 +1,6 @@
+appId: com.android.settings
+---
+- launchApp
+- tapOn: "Network & internet"
+- scroll
+- tapOn: "Internet"
