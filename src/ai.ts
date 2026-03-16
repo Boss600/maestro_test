@@ -5,7 +5,7 @@ import OpenAI from "openai"
 import { fmt } from "./cli"
 import * as fs from "fs"
 
-const AGENT_SYSTEM_PROMPT = `
+const VISION_AGENT_SYSTEM_PROMPT = `
 Expert mobile test engineer acting as a Live Agent.
 You execute tests ONE STEP AT A TIME.
 
@@ -34,15 +34,55 @@ CONTEXT-AWARE MEMORY & LOOP PREVENTION:
 - If an action resulted in "FAILED", you MUST NOT repeat it exactly. Try a different selector (e.g., use ID instead of Text), scroll, or try a different path.
 - If you find yourself repeating actions, BREAK the loop by trying a new approach.
 
-Commands allowed:
-  - tapOn: "Text" or { id: "id" } or { point: "X,Y" }
-    - Note: "X,Y" must be absolute integer pixels (e.g., "500,1000") or percentages (e.g., "50%,50%").
-    - NEVER use decimal ratios like "0.5,0.8".
-  - inputText: "text"
-  - assertVisible: "text"
+Commands allowed (in order of preference):
+  - tapOn: { id: "resource-id" }   // MOST RELIABLE
+  - tapOn: "Text Label"            // VERY RELIABLE
+  - assertVisible: "Text Label" or { id: "resource-id" }
   - scrollUntilVisible: { element: { text: "Text" }, direction: DOWN|UP }
-  - back, waitForAnimationToEnd
+  - inputText: "text"
   - runFlow: flows/filename.yaml
+  - back, waitForAnimationToEnd
+  - tapOn: { point: "X%,Y%" }          // LEAST RELIABLE - USE ONLY AS A LAST RESORT
+    - "X%,Y%" MUST be percentages (e.g., "50%,75%"). DO NOT use pixels or decimals.
+
+Special elements:
+- Switches/Toggles: Do NOT tap on a Switch using text. Find its resource-id and tap on that. If it has no ID, tap on the text label next to it.
+
+Notes:
+- Return ONLY the YAML step, no markdown, no explanation.
+`
+
+const TEXT_ONLY_AGENT_SYSTEM_PROMPT = `
+Expert mobile test engineer acting as a Live Agent.
+You execute tests ONE STEP AT A TIME based ONLY on the UI Hierarchy (XML).
+
+Your Goal:
+Achieve the goal described in the "Test Description" by providing the SINGLE NEXT Maestro command.
+
+**IMPORTANT: Visual Analysis**
+- If you determine the next logical action requires identifying a purely visual element (like an icon without a text label) that is NOT described in the UI hierarchy, you MUST return the special command: REQUEST_SCREENSHOT
+- Do NOT guess. If the element (e.g., a gear icon for settings) has no "text" or "resource-id" in the XML, you need a screenshot.
+
+DATA EXTRACTION & MEMORY:
+- To "read" a value, use the command: EXTRACT: key="value"
+- The "Working Memory" section will show you what you have already extracted.
+
+Rules:
+- Return ONLY the next Maestro command (e.g., "- tapOn: \"Login\""), "REQUEST_SCREENSHOT", "DONE", or "ERROR: <reason>".
+- Do NOT return a full file or multiple steps.
+
+CONTEXT-AWARE MEMORY & LOOP PREVENTION:
+- Use the "Action History" to track your progress.
+- If an action resulted in "FAILED", you MUST NOT repeat it. Try a different selector or a new approach.
+
+Commands allowed (in order of preference):
+  - tapOn: { id: "resource-id" }   // MOST RELIABLE
+  - tapOn: "Text Label"            // VERY RELIABLE
+  - assertVisible: "Text Label" or { id: "resource-id" }
+  - scrollUntilVisible: { element: { text: "Text" }, direction: DOWN|UP }
+  - inputText: "text"
+  - runFlow: flows/filename.yaml
+  - back, waitForAnimationToEnd
 
 Notes:
 - Return ONLY the YAML step, no markdown, no explanation.
@@ -90,10 +130,24 @@ export async function generateNextStep(
   testDescription: string,
   currentHierarchy: string,
   history: string[] = [],
-  screenshotPath?: string,
-  availableFlows: string[] = [],
-  memory: Record<string, string> = {}
+  options: {
+    screenshotPath?: string
+    availableFlows?: string[]
+    memory?: Record<string, string>
+    useVision?: boolean
+  }
 ): Promise<string> {
+  const {
+    screenshotPath,
+    availableFlows = [],
+    memory = {},
+    useVision = false,
+  } = options
+
+  const systemPrompt = useVision
+    ? VISION_AGENT_SYSTEM_PROMPT
+    : TEXT_ONLY_AGENT_SYSTEM_PROMPT
+
   const flowsContext = availableFlows.length > 0 
     ? `Available reusable flows in "flows/":\n${availableFlows.map(f => `- ${f}`).join("\n")}`
     : "No reusable flows available."
@@ -122,11 +176,12 @@ What is the SINGLE NEXT Maestro command? (Return "DONE" if finished)`
   if (model === "claude") {
     const apiKey = process.env.ANTHROPIC_API_KEY!
     const client = new Anthropic({ apiKey })
+    // Claude does not support vision in this implementation yet
     const response = await withRetry("Claude Agent", () =>
       client.messages.create({
         model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-latest",
         max_tokens: 256,
-        system: AGENT_SYSTEM_PROMPT,
+        system: systemPrompt,
         messages: [{ role: "user", content: promptText }],
       })
     )
@@ -140,26 +195,22 @@ What is the SINGLE NEXT Maestro command? (Return "DONE" if finished)`
     const client = new Groq({ apiKey })
     
     const messages: any[] = [
-      { role: "system", content: AGENT_SYSTEM_PROMPT },
+      { role: "system", content: systemPrompt },
     ]
 
-    if (screenshotPath && fs.existsSync(screenshotPath)) {
+    const userContent: any[] = [{ type: "text", text: promptText }]
+
+    if (useVision && screenshotPath && fs.existsSync(screenshotPath)) {
       const imageData = fs.readFileSync(screenshotPath).toString("base64")
-      messages.push({
-        role: "user",
-        content: [
-          { type: "text", text: promptText },
-          {
-            type: "image_url",
-            image_url: {
-              url: `data:image/png;base64,${imageData}`,
-            },
-          },
-        ],
+      userContent.push({
+        type: "image_url",
+        image_url: {
+          url: `data:image/png;base64,${imageData}`,
+        },
       })
-    } else {
-      messages.push({ role: "user", content: promptText })
     }
+    
+    messages.push({ role: "user", content: userContent })
 
     const response = await withRetry("Groq Agent", () =>
       client.chat.completions.create({
@@ -175,26 +226,22 @@ What is the SINGLE NEXT Maestro command? (Return "DONE" if finished)`
     const client = new OpenAI({ apiKey })
     
     const messages: any[] = [
-      { role: "system", content: AGENT_SYSTEM_PROMPT },
+      { role: "system", content: systemPrompt },
     ]
 
-    if (screenshotPath && fs.existsSync(screenshotPath)) {
+    const userContent: any[] = [{ type: "text", text: promptText }]
+
+    if (useVision && screenshotPath && fs.existsSync(screenshotPath)) {
       const imageData = fs.readFileSync(screenshotPath).toString("base64")
-      messages.push({
-        role: "user",
-        content: [
-          { type: "text", text: promptText },
-          {
-            type: "image_url",
-            image_url: {
-              url: `data:image/png;base64,${imageData}`,
-            },
-          },
-        ],
+      userContent.push({
+        type: "image_url",
+        image_url: {
+          url: `data:image/png;base64,${imageData}`,
+        },
       })
-    } else {
-      messages.push({ role: "user", content: promptText })
     }
+
+    messages.push({ role: "user", content: userContent })
 
     const response = await withRetry("OpenAI Agent", () =>
       client.chat.completions.create({
@@ -205,14 +252,14 @@ What is the SINGLE NEXT Maestro command? (Return "DONE" if finished)`
       })
     )
     rawText = response.choices[0]?.message?.content || ""
-  } else {
+  } else { // Gemini
     const apiKey = process.env.GEMINI_API_KEY!
     const genAI = new GoogleGenerativeAI(apiKey)
     const gemModel = genAI.getGenerativeModel({ model: process.env.GEMINI_MODEL || "gemini-1.5-flash-latest" })
     
-    const parts: any[] = [{ text: `${AGENT_SYSTEM_PROMPT}\n\n${promptText}` }]
+    const parts: any[] = [{ text: `${systemPrompt}\n\n${promptText}` }]
     
-    if (screenshotPath && fs.existsSync(screenshotPath)) {
+    if (useVision && screenshotPath && fs.existsSync(screenshotPath)) {
       const imageData = fs.readFileSync(screenshotPath).toString("base64")
       parts.push({
         inlineData: {

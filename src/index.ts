@@ -5,7 +5,7 @@ import * as path from "path"
 import { Args, TestReport } from "./types"
 import { parseArgs, fmt, c } from "./cli"
 import { generateNextStep } from "./ai"
-import { runMaestroTest, captureInitialHierarchy, getHierarchy, takeScreenshot } from "./maestro"
+import { runMaestroTest, getHierarchy, takeScreenshot } from "./maestro"
 import { getApkMetadata, isAppInstalled, getInstalledVersion, installApk } from "./utils"
 
 async function getAvailableFlows(): Promise<string[]> {
@@ -42,16 +42,41 @@ async function executeAgentLoop(
   for (let step = 1; step <= maxSteps; step++) {
     console.log(fmt.step(step, "Capturing UI state..."))
     const hierarchy = await getHierarchy()
-    const screenshotName = `step_${step}_${Date.now()}.png`
-    let screenshotPath = ""
-    try {
-      screenshotPath = await takeScreenshot(screenshotName)
-    } catch (err: any) {
-      console.log(fmt.warn(`Could not capture screenshot: ${err.message}`))
-    }
     
-    console.log(fmt.step(step, `Thinking (Step ${step}/${maxSteps})...`))
-    const nextStep = await generateNextStep(args.model, appId, testDescription, hierarchy, history, screenshotPath, availableFlows, memory)
+    console.log(fmt.step(step, `Thinking (Step ${step}/${maxSteps}, Text-Only)...`))
+    let nextStep = await generateNextStep(
+      args.model, 
+      appId, 
+      testDescription, 
+      hierarchy, 
+      history, 
+      { availableFlows, memory, useVision: false }
+    )
+    
+    // If AI requests vision, or if we decide to fallback, use vision
+    if (nextStep.toUpperCase() === "REQUEST_SCREENSHOT") {
+      console.log(fmt.info("Text-only failed, escalating to Vision..."))
+      const screenshotName = `step_${step}_${Date.now()}.png`
+      let screenshotPath = ""
+      try {
+        screenshotPath = await takeScreenshot(screenshotName)
+      } catch (err: any) {
+        console.log(fmt.warn(`Could not capture screenshot: ${err.message}`))
+        // If screenshot fails, we can't proceed with vision
+        analysis = `Error: Screenshot failed, cannot use vision. Reason: ${err.message}`
+        break
+      }
+      
+      console.log(fmt.step(step, `Thinking (Step ${step}/${maxSteps}, With Vision)...`))
+      nextStep = await generateNextStep(
+        args.model,
+        appId,
+        testDescription,
+        hierarchy,
+        history,
+        { availableFlows, memory, useVision: true, screenshotPath }
+      )
+    }
     
     if (nextStep.toUpperCase() === "DONE") {
       console.log(fmt.success("AI signaled test completion."))
@@ -81,21 +106,8 @@ async function executeAgentLoop(
 
     console.log(fmt.info(`Action: ${nextStep}`))
 
-    // Resolve runFlow paths to absolute paths
-    let processedStep = nextStep
-    if (nextStep.includes("runFlow:")) {
-      const match = nextStep.match(/runFlow:\s*["']?([^"'\n]+)["']?/)
-      if (match) {
-        const flowPath = match[1].trim()
-        if (!path.isAbsolute(flowPath)) {
-          const absolutePath = path.resolve(flowPath)
-          processedStep = nextStep.replace(flowPath, absolutePath)
-        }
-      }
-    }
-
     // Execute the single step
-    const stepYaml = `appId: ${appId}\n---\n${processedStep.startsWith("-") ? processedStep : "- " + processedStep}`
+    const stepYaml = `appId: ${appId}\n---\n${nextStep.startsWith("-") ? nextStep : "- " + nextStep}`
     const stepPath = path.resolve(`outputs/generated/agent_step_${step}.yaml`)
     fs.writeFileSync(stepPath, stepYaml)
     
@@ -104,8 +116,46 @@ async function executeAgentLoop(
     if (result.passed) {
       history.push(`${nextStep} -> SUCCESS`)
     } else {
-      console.log(fmt.warn(`Action failed at step ${step}.`))
+      console.log(fmt.warn(`Action failed at step ${step}. Retrying with vision...`))
       history.push(`${nextStep} -> FAILED`)
+
+      // --- INTELLIGENT FALLBACK ON FAILURE ---
+      const screenshotName = `step_${step}_fail_${Date.now()}.png`
+      let screenshotPath = ""
+      try {
+        screenshotPath = await takeScreenshot(screenshotName)
+      } catch (err: any) {
+        analysis = `Error: Action failed and subsequent screenshot failed. Reason: ${err.message}`
+        break
+      }
+      
+      console.log(fmt.step(step, `Thinking (Retry with Vision)...`))
+      const visionStep = await generateNextStep(
+        args.model,
+        appId,
+        testDescription,
+        hierarchy, // We use the same hierarchy, the action failed
+        history,
+        { availableFlows, memory, useVision: true, screenshotPath }
+      )
+
+      if (visionStep.toUpperCase() === "DONE" || visionStep.startsWith("ERROR:") || visionStep.toUpperCase() === nextStep.toUpperCase()) {
+         analysis = `Action failed and vision-based retry did not offer a new step. Last action: ${nextStep}`
+         break;
+      }
+
+      console.log(fmt.info(`Vision-based Action: ${visionStep}`))
+      const visionStepYaml = `appId: ${appId}\n---\n- ${visionStep}`
+      const visionStepPath = path.resolve(`outputs/generated/agent_step_${step}_vision.yaml`)
+      fs.writeFileSync(visionStepPath, visionStepYaml)
+      const visionResult = await runMaestroTest(visionStepPath, appId)
+
+      if (visionResult.passed) {
+        history.push(`${visionStep} -> SUCCESS (Vision Heal)`)
+      } else {
+        analysis = `Action failed on both text and vision attempts. Last vision action: ${visionStep}`
+        break;
+      }
     }
     
     // Safety sleep
@@ -118,7 +168,7 @@ async function executeAgentLoop(
 
   return {
     passed,
-    healed: false,
+    healed: history.some(h => h.includes("Vision Heal")),
     durationSec: ((Date.now() - start) / 1000).toFixed(1),
     analysis
   }
@@ -186,7 +236,8 @@ async function main() {
   console.log(fmt.header("📊  AGENT SUMMARY"))
   summary.forEach((res, i) => {
     const status = res.passed ? `${c.green}PASSED${c.reset}` : `${c.red}FAILED${c.reset}`
-    console.log(`${c.dim}[${i + 1}]${c.reset} ${status.padEnd(20)} ${res.file ?? "Manual Test"}`)
+    const healed = res.healed ? ` ${c.cyan}(HEALED)${c.reset}` : ""
+    console.log(`${c.dim}[${i + 1}]${c.reset} ${status.padEnd(20)} ${res.file ?? "Manual Test"}${healed}`)
     if (!res.passed) console.log(`      ${c.red}Error: ${res.analysis}${c.reset}`)
   })
 }
