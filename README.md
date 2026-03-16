@@ -22,7 +22,7 @@ An autonomous test agent for [Maestro](https://maestro.mobile.dev/) that uses AI
 1. **Prerequisites**:
    - Node.js (v16+)
    - [Maestro CLI](https://maestro.mobile.dev/getting-started/installing-maestro) installed.
-   - An Android emulator or device connected.
+   - An Android emulator or device connected. (Android Studio: Device Manager)
 
 2. **Installation**:
    ```bash
