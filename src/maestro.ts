@@ -23,7 +23,9 @@ export async function takeScreenshot(fileName: string): Promise<string> {
     if (!fs.existsSync(screenshotDir)) fs.mkdirSync(screenshotDir, { recursive: true })
     
     const filePath = path.join(screenshotDir, fileName)
-    await execAsync(`maestro screenshot "${filePath}"`, {
+    // Using adb directly as 'maestro screenshot' is not available in all Maestro versions
+    // We use shell screencap + pull to avoid binary encoding issues with shell redirection on Windows
+    await execAsync(`adb shell screencap -p /sdcard/screen.png && adb pull /sdcard/screen.png "${filePath}"`, {
       timeout: 15_000,
     })
     return filePath

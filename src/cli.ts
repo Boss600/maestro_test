@@ -37,8 +37,20 @@ export function parseArgs(): Args {
   }
 
   const get = (flag: string): string | undefined => {
-    const i = args.indexOf(flag)
-    return i !== -1 ? args[i + 1] : undefined
+    const index = args.findIndex(a => a === flag || a.startsWith(flag + "="))
+    if (index === -1) return undefined
+    
+    const arg = args[index]
+    if (arg.includes("=")) {
+      return arg.split("=").slice(1).join("=")
+    }
+    
+    const values = []
+    for (let j = index + 1; j < args.length; j++) {
+      if (args[j].startsWith("--")) break
+      values.push(args[j])
+    }
+    return values.length > 0 ? values.join(" ") : undefined
   }
 
   const app = get("--app")
@@ -64,15 +76,17 @@ export function parseArgs(): Args {
 
   const anthropicKey = process.env.ANTHROPIC_API_KEY
   const geminiKey = process.env.GEMINI_API_KEY
+  const groqKey = process.env.GROQ_API_KEY
+  const openaiKey = process.env.OPENAI_API_KEY
 
-  const defaultModel = anthropicKey ? "claude" : (geminiKey ? "gemini" : "claude")
+  const defaultModel = anthropicKey ? "claude" : (geminiKey ? "gemini" : (groqKey ? "groq" : (openaiKey ? "openai" : "claude")))
 
   return {
     app,
     apk,
     test,
     suite,
-    model: (get("--model") as "claude" | "gemini") ?? defaultModel,
+    model: (get("--model") as "claude" | "gemini" | "groq" | "openai") ?? defaultModel,
     output: get("--output") ?? "outputs/generated/generated.yaml",
     dryRun: args.includes("--dry-run"),
     noHierarchy: args.includes("--no-hierarchy"),
@@ -95,7 +109,7 @@ ${c.bold}Required:${c.reset}
   --suite  <dir>          Directory containing .feature or .txt test descriptions
 
 ${c.bold}Options:${c.reset}
-  --model  claude|gemini  AI model to use (default: claude)
+  --model  claude|gemini|groq|openai  AI model to use (default: claude)
   --output <file>         Output YAML filename (default: outputs/generated/generated.yaml)
   --dry-run               Generate YAML only, skip execution
   --no-hierarchy          Skip capturing UI hierarchy (saves tokens)

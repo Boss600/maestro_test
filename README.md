@@ -30,30 +30,38 @@ An autonomous test agent for [Maestro](https://maestro.mobile.dev/) that uses AI
    ```
 
 3. **Environment Variables**:
-   Set your API keys:
+   Create a `.env` file (see `.env.example`):
    ```bash
-   export ANTHROPIC_API_KEY=your_key
-   # OR
-   export GEMINI_API_KEY=your_key
+   GROQ_API_KEY=your_key
+   OPENAI_API_KEY=your_key
+   ANTHROPIC_API_KEY=your_key
+   GEMINI_API_KEY=your_key
    ```
 
 ## 🏃 Running Tests
 
 ### Single Test
 ```bash
-npx ts-node src/index.ts --app com.android.settings --test "Open Network settings and verify Wi-Fi is enabled"
+npm start -- --app com.android.settings --test "Open Network settings and verify Wi-Fi is enabled"
 ```
 
 ### Test Suite
 ```bash
-npx ts-node src/index.ts --app com.android.settings --suite test-suite/
+npm start -- --app com.android.settings --suite test-suite/
 ```
 
 ### Options
-- `--model`: `claude` (default) or `gemini`
+- `--model`: `claude`, `gemini`, `groq`, or `openai` (default: auto-detected based on available keys)
 - `--apk`: Path to an APK file (will be installed automatically)
 - `--dry-run`: Generate the test flow without executing it
+- `--no-hierarchy`: Skip capturing UI hierarchy (saves tokens)
 
+### Custom Models
+You can override default models in `.env`:
+```bash
+GROQ_MODEL=llama-3.3-70b-versatile
+OPENAI_MODEL=gpt-4o
+```
 ## 📝 License
 
 ISC

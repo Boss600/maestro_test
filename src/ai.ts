@@ -1,5 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk"
 import { GoogleGenerativeAI } from "@google/generative-ai"
+import Groq from "groq-sdk"
+import OpenAI from "openai"
 import { fmt } from "./cli"
 import * as fs from "fs"
 
@@ -29,11 +31,13 @@ Rules:
 
 CONTEXT-AWARE MEMORY & LOOP PREVENTION:
 - Use the "Action History" to track your progress.
-- If an action resulted in "FAILED", do NOT repeat it exactly. Try a different selector (e.g., use ID instead of Text), scroll, or try a different path.
+- If an action resulted in "FAILED", you MUST NOT repeat it exactly. Try a different selector (e.g., use ID instead of Text), scroll, or try a different path.
 - If you find yourself repeating actions, BREAK the loop by trying a new approach.
 
 Commands allowed:
   - tapOn: "Text" or { id: "id" } or { point: "X,Y" }
+    - Note: "X,Y" must be absolute integer pixels (e.g., "500,1000") or percentages (e.g., "50%,50%").
+    - NEVER use decimal ratios like "0.5,0.8".
   - inputText: "text"
   - assertVisible: "text"
   - scrollUntilVisible: { element: { text: "Text" }, direction: DOWN|UP }
@@ -81,7 +85,7 @@ export async function withRetry<T>(
 }
 
 export async function generateNextStep(
-  model: "claude" | "gemini",
+  model: "claude" | "gemini" | "groq" | "openai",
   appId: string,
   testDescription: string,
   currentHierarchy: string,
@@ -95,22 +99,22 @@ export async function generateNextStep(
     : "No reusable flows available."
 
   const memoryContext = Object.keys(memory).length > 0
-    ? `Working Memory (Extracted Data):\n${Object.entries(memory).map(([k, v]) => `- \${k}: \${v}`).join("\n")}`
+    ? `Working Memory (Extracted Data):\n${Object.entries(memory).map(([k, v]) => `- \${${k}}: ${v}`).join("\n")}`
     : "Working Memory: Empty"
 
   const promptText = `
 Test Description: ${testDescription}
 App ID: ${appId}
 
-\${flowsContext}
+${flowsContext}
 
-\${memoryContext}
+${memoryContext}
 
 Current UI Hierarchy:
-\${currentHierarchy}
+${currentHierarchy}
 
 Action History (Steps already taken):
-\${history.length > 0 ? history.join("\n") : "None"}
+${history.length > 0 ? history.join("\n") : "None"}
 
 What is the SINGLE NEXT Maestro command? (Return "DONE" if finished)`
 
@@ -120,7 +124,7 @@ What is the SINGLE NEXT Maestro command? (Return "DONE" if finished)`
     const client = new Anthropic({ apiKey })
     const response = await withRetry("Claude Agent", () =>
       client.messages.create({
-        model: "claude-3-5-sonnet-latest",
+        model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-latest",
         max_tokens: 256,
         system: AGENT_SYSTEM_PROMPT,
         messages: [{ role: "user", content: promptText }],
@@ -131,12 +135,82 @@ What is the SINGLE NEXT Maestro command? (Return "DONE" if finished)`
       .map((b) => (b as { type: "text"; text: string }).text)
       .join("")
       .trim()
+  } else if (model === "groq") {
+    const apiKey = process.env.GROQ_API_KEY!
+    const client = new Groq({ apiKey })
+    
+    const messages: any[] = [
+      { role: "system", content: AGENT_SYSTEM_PROMPT },
+    ]
+
+    if (screenshotPath && fs.existsSync(screenshotPath)) {
+      const imageData = fs.readFileSync(screenshotPath).toString("base64")
+      messages.push({
+        role: "user",
+        content: [
+          { type: "text", text: promptText },
+          {
+            type: "image_url",
+            image_url: {
+              url: `data:image/png;base64,${imageData}`,
+            },
+          },
+        ],
+      })
+    } else {
+      messages.push({ role: "user", content: promptText })
+    }
+
+    const response = await withRetry("Groq Agent", () =>
+      client.chat.completions.create({
+        model: process.env.GROQ_MODEL || "meta-llama/llama-4-scout-17b-16e-instruct",
+        messages,
+        max_tokens: 256,
+        temperature: 0,
+      })
+    )
+    rawText = response.choices[0]?.message?.content || ""
+  } else if (model === "openai") {
+    const apiKey = process.env.OPENAI_API_KEY!
+    const client = new OpenAI({ apiKey })
+    
+    const messages: any[] = [
+      { role: "system", content: AGENT_SYSTEM_PROMPT },
+    ]
+
+    if (screenshotPath && fs.existsSync(screenshotPath)) {
+      const imageData = fs.readFileSync(screenshotPath).toString("base64")
+      messages.push({
+        role: "user",
+        content: [
+          { type: "text", text: promptText },
+          {
+            type: "image_url",
+            image_url: {
+              url: `data:image/png;base64,${imageData}`,
+            },
+          },
+        ],
+      })
+    } else {
+      messages.push({ role: "user", content: promptText })
+    }
+
+    const response = await withRetry("OpenAI Agent", () =>
+      client.chat.completions.create({
+        model: process.env.OPENAI_MODEL || "gpt-4o",
+        messages,
+        max_tokens: 256,
+        temperature: 0,
+      })
+    )
+    rawText = response.choices[0]?.message?.content || ""
   } else {
     const apiKey = process.env.GEMINI_API_KEY!
     const genAI = new GoogleGenerativeAI(apiKey)
-    const gemModel = genAI.getGenerativeModel({ model: "gemini-1.5-flash" })
+    const gemModel = genAI.getGenerativeModel({ model: process.env.GEMINI_MODEL || "gemini-1.5-flash-latest" })
     
-    const parts: any[] = [{ text: `\${AGENT_SYSTEM_PROMPT}\n\n\${promptText}` }]
+    const parts: any[] = [{ text: `${AGENT_SYSTEM_PROMPT}\n\n${promptText}` }]
     
     if (screenshotPath && fs.existsSync(screenshotPath)) {
       const imageData = fs.readFileSync(screenshotPath).toString("base64")

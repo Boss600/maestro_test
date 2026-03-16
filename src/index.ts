@@ -1,4 +1,5 @@
 #!/usr/bin/env ts-node
+import "dotenv/config"
 import * as fs from "fs"
 import * as path from "path"
 import { Args, TestReport } from "./types"
@@ -45,8 +46,8 @@ async function executeAgentLoop(
     let screenshotPath = ""
     try {
       screenshotPath = await takeScreenshot(screenshotName)
-    } catch (err) {
-      console.log(fmt.warn("Could not capture screenshot."))
+    } catch (err: any) {
+      console.log(fmt.warn(`Could not capture screenshot: ${err.message}`))
     }
     
     console.log(fmt.step(step, `Thinking (Step ${step}/${maxSteps})...`))
@@ -80,8 +81,21 @@ async function executeAgentLoop(
 
     console.log(fmt.info(`Action: ${nextStep}`))
 
+    // Resolve runFlow paths to absolute paths
+    let processedStep = nextStep
+    if (nextStep.includes("runFlow:")) {
+      const match = nextStep.match(/runFlow:\s*["']?([^"'\n]+)["']?/)
+      if (match) {
+        const flowPath = match[1].trim()
+        if (!path.isAbsolute(flowPath)) {
+          const absolutePath = path.resolve(flowPath)
+          processedStep = nextStep.replace(flowPath, absolutePath)
+        }
+      }
+    }
+
     // Execute the single step
-    const stepYaml = `appId: ${appId}\n---\n${nextStep.startsWith("-") ? nextStep : "- " + nextStep}`
+    const stepYaml = `appId: ${appId}\n---\n${processedStep.startsWith("-") ? processedStep : "- " + processedStep}`
     const stepPath = path.resolve(`outputs/generated/agent_step_${step}.yaml`)
     fs.writeFileSync(stepPath, stepYaml)
     

@@ -3,7 +3,7 @@ export interface Args {
   apk?: string
   test?: string
   suite?: string
-  model: "claude" | "gemini"
+  model: "claude" | "gemini" | "groq" | "openai"
   output: string
   dryRun: boolean
   noHierarchy: boolean
