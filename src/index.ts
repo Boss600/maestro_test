@@ -5,7 +5,7 @@ import * as path from "path"
 import { Args, TestReport } from "./types"
 import { parseArgs, fmt, c } from "./cli"
 import { generateNextStep } from "./ai"
-import { runMaestroTest, getHierarchy, takeScreenshot } from "./maestro"
+import { runMaestroTest, getHierarchy, takeScreenshot, extractMaestroError, logStep } from "./maestro"
 import { getApkMetadata, isAppInstalled, getInstalledVersion, installApk } from "./utils"
 
 async function getAvailableFlows(): Promise<string[]> {
@@ -100,6 +100,7 @@ async function executeAgentLoop(
         memory[key.trim()] = value
         console.log(fmt.success(`Memory Updated: ${key.trim()} = ${value}`))
         history.push(`EXTRACT: ${key.trim()} -> SUCCESS`)
+        logStep({ step, type: "extraction", action: nextStep, status: "SUCCESS" })
         continue // Skip to next step after extraction
       }
     }
@@ -115,9 +116,13 @@ async function executeAgentLoop(
     
     if (result.passed) {
       history.push(`${nextStep} -> SUCCESS`)
+      logStep({ step, type: "text", action: nextStep, status: "SUCCESS", durationMs: result.durationMs })
     } else {
-      console.log(fmt.warn(`Action failed at step ${step}. Retrying with vision...`))
-      history.push(`${nextStep} -> FAILED`)
+      const errorLine = extractMaestroError(result.output)
+      const errorMsg = errorLine ? ` (Reason: ${errorLine})` : ""
+      console.log(fmt.warn(`Action failed at step ${step}.${errorMsg} Retrying with vision...`))
+      history.push(`${nextStep} -> FAILED${errorMsg}`)
+      logStep({ step, type: "text", action: nextStep, status: "FAILED", error: errorLine, durationMs: result.durationMs })
 
       // --- INTELLIGENT FALLBACK ON FAILURE ---
       const screenshotName = `step_${step}_fail_${Date.now()}.png`
@@ -152,10 +157,15 @@ async function executeAgentLoop(
 
       if (visionResult.passed) {
         history.push(`${visionStep} -> SUCCESS (Vision Heal)`)
+        logStep({ step, type: "vision", action: visionStep, status: "HEALED", durationMs: visionResult.durationMs })
       } else {
-        analysis = `Action failed on both text and vision attempts. Last vision action: ${visionStep}`
-        break;
+        const visionError = extractMaestroError(visionResult.output)
+        const visionErrorMsg = visionError ? `\nReason: ${visionError}` : ""
+        analysis = `Action failed on both text and vision attempts. Last vision action: ${visionStep}${visionErrorMsg}`
+        logStep({ step, type: "vision", action: visionStep, status: "FAILED", error: visionError, durationMs: visionResult.durationMs })
+        break
       }
+
     }
     
     // Safety sleep
@@ -238,7 +248,15 @@ async function main() {
     const status = res.passed ? `${c.green}PASSED${c.reset}` : `${c.red}FAILED${c.reset}`
     const healed = res.healed ? ` ${c.cyan}(HEALED)${c.reset}` : ""
     console.log(`${c.dim}[${i + 1}]${c.reset} ${status.padEnd(20)} ${res.file ?? "Manual Test"}${healed}`)
-    if (!res.passed) console.log(`      ${c.red}Error: ${res.analysis}${c.reset}`)
+    if (!res.passed) {
+      const errorLines = res.analysis.split("\n")
+      console.log(`      ${c.red}Error: ${errorLines[0]}${c.reset}`)
+      if (errorLines.length > 1) {
+        errorLines.slice(1).forEach((line: string) => {
+          if (line.trim()) console.log(fmt.errorDetail(line.trim()))
+        })
+      }
+    }
   })
 }
 

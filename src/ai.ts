@@ -4,6 +4,7 @@ import Groq from "groq-sdk"
 import OpenAI from "openai"
 import { fmt } from "./cli"
 import * as fs from "fs"
+import * as path from "path"
 
 const VISION_AGENT_SYSTEM_PROMPT = `
 Expert mobile test engineer acting as a Live Agent.
@@ -106,7 +107,11 @@ export async function withRetry<T>(
         msg.includes("overloaded") ||
         msg.includes("too many requests") ||
         msg.includes("429") ||
-        msg.includes("deadline exceeded")
+        msg.includes("deadline exceeded") ||
+        msg.includes("socket hang up") ||
+        msg.includes("timeout") ||
+        msg.includes("econnreset") ||
+        msg.includes("etimedout")
 
       if (!isRetryable || i === maxRetries - 1) throw err
 
@@ -123,6 +128,9 @@ export async function withRetry<T>(
   }
   throw lastError
 }
+
+// Track if Gemini primary has hit quota limits to switch to secondary persistently for the session
+let useGeminiSecondary = false
 
 export async function generateNextStep(
   model: "claude" | "gemini" | "groq" | "openai",
@@ -255,21 +263,48 @@ What is the SINGLE NEXT Maestro command? (Return "DONE" if finished)`
   } else { // Gemini
     const apiKey = process.env.GEMINI_API_KEY!
     const genAI = new GoogleGenerativeAI(apiKey)
-    const gemModel = genAI.getGenerativeModel({ model: process.env.GEMINI_MODEL || "gemini-1.5-flash-latest" })
+    const primaryModelName = process.env.GEMINI_MODEL || "gemini-1.5-flash-latest"
+    const secondaryModelName = process.env.GEMINI_MODEL_SECONDARY || "gemini-1.5-pro-latest"
     
-    const parts: any[] = [{ text: `${systemPrompt}\n\n${promptText}` }]
+    let gemModel = genAI.getGenerativeModel({ model: useGeminiSecondary ? secondaryModelName : primaryModelName })
+    
+    let parts: any[] = [{ text: `${systemPrompt}\n\n${promptText}` }]
     
     if (useVision && screenshotPath && fs.existsSync(screenshotPath)) {
       const imageData = fs.readFileSync(screenshotPath).toString("base64")
+      
+      // If it's a desktop capture (fallback), let the AI know it needs to find the emulator window
+      if (path.basename(screenshotPath).startsWith("desktop_")) {
+        parts = [{ text: `${systemPrompt}\n\nNOTE: The following screenshot is a FULL DESKTOP CAPTURE (intelligent fallback). Locate the Android emulator window within the desktop image to determine the next step.\n\n${promptText}` }]
+      }
+
       parts.push({
         inlineData: {
           data: imageData,
           mimeType: "image/png"
         }
       })
+    } else if (useVision) {
+      // If vision was requested but no screenshot is available, provide a fallback note
+      parts = [{ text: `${systemPrompt}\n\nNOTE: Vision was requested but screenshot capture failed. Please proceed using the UI Hierarchy (XML) provided below.\n\n${promptText}` }]
     }
 
-    const result = await withRetry("Gemini Agent", () => gemModel.generateContent(parts))
+    let result
+    try {
+      result = await withRetry(useGeminiSecondary ? "Gemini Agent (Secondary)" : "Gemini Agent", () => gemModel.generateContent(parts))
+    } catch (err: any) {
+      const msg = err.message?.toLowerCase() ?? ""
+      const isQuotaError = msg.includes("quota") || msg.includes("exhausted") || msg.includes("429")
+      
+      if (!useGeminiSecondary && isQuotaError) {
+        console.warn(fmt.warn(`Gemini primary model quota exhausted. Switching to secondary: ${secondaryModelName}`))
+        useGeminiSecondary = true
+        gemModel = genAI.getGenerativeModel({ model: secondaryModelName })
+        result = await withRetry("Gemini Agent (Secondary)", () => gemModel.generateContent(parts))
+      } else {
+        throw err
+      }
+    }
     rawText = result.response.text().trim()
   }
 

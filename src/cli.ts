@@ -26,6 +26,7 @@ export const fmt = {
     `\n${c.bold}${c.magenta}${"─".repeat(50)}${c.reset}\n${c.bold}${c.white}  ${msg}${c.reset}\n${c.bold}${c.magenta}${"─".repeat(50)}${c.reset}`,
   label: (key: string, val: string) =>
     `  ${c.dim}${key}:${c.reset} ${c.cyan}${val}${c.reset}`,
+  errorDetail: (msg: string) => `      ${c.red}↳ ${c.dim}${msg}${c.reset}`,
 }
 
 export function parseArgs(): Args {
