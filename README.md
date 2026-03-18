@@ -1,64 +1,74 @@
-# Maestro AI Test System 🤖
+# Maestro AI Agent
 
-An AI-driven mobile test automation tool that translates natural language goals into executable Maestro YAML tests. It supports multiple AI providers, automatic APK management, and robust execution on Android devices or emulators.
+This project is an AI-driven system for automating mobile UI tests using the Maestro framework. It has three main parts:
 
-## 🚀 Key Features
+1.  **AI Agent (`src/`)**: A command-line tool that uses AI (like Claude, Gemini, or Groq) to automatically generate Maestro YAML test files from a natural language goal (e.g., "log into the app").
+2.  **Reusable Flow Library (`flows/`)**: A collection of pre-made Maestro YAML files for common actions (e.g., opening a settings page).
+3.  **Manual Test Plans (`test-suite/`)**: Human-readable `.txt` files describing complex test scenarios, which instruct a QA tester on which reusable flows to run.
 
-- **Natural Language to Maestro**: Generate structured mobile tests from plain English goals.
-- **APK-First Workflow**: Automatically detects package IDs and versions from APKs; installs or updates the app if needed.
-- **Multi-Provider AI**: Integrated with **Gemini** (Flash/Pro), **Claude** (3.5 Sonnet), and **Groq** (Llama 3).
-- **Intelligent Fallbacks**:
-  - **Model Fallback**: Automatically switches from Gemini Flash to Pro on quota issues.
-  - **Screenshot Fallback**: Uses Windows PowerShell to capture the screen if ADB screenshotting fails.
-- **Deterministic Execution**: Generates clean, validated Maestro YAML that can be version-controlled and run repeatedly.
-- **Strict Validation**: Ensures AI-generated steps strictly match allowed Maestro operations (`tapOn`, `inputText`, `scroll`, etc.).
-- **Robust Retries**: Built-in exponential backoff for AI API failures (rate limits, timeouts, 503s).
+## Project Structure
 
-## 🛠️ Usage
+*   `src/`: Contains the core source code for the AI agent.
+    *   `ai.ts`: Manages interactions with AI models (Gemini, Claude, etc.) to generate tests.
+    *   `cli.ts`: Defines the command-line interface (e.g., the `generate` and `run` commands).
+    *   `index.ts`: The main entry point that starts the application.
+    *   `maestro.ts`: The bridge that communicates with the Maestro and `adb` command-line tools to control the device.
+    *   `types.ts`: Defines custom data types and interfaces used throughout the project.
+    *   `utils.ts`: Contains miscellaneous helper functions.
+*   `flows/`: A library of reusable, pre-written Maestro test files (`.yaml`) for common actions.
+*   `test-suite/`: Contains high-level, human-readable test plans (`.txt`) that describe manual QA scenarios.
+*   `outputs/`: The default directory for all generated files.
+    *   `generated/`: Where newly AI-generated Maestro test files are saved.
+    *   `logs/`: Where logs from test executions are stored.
+    *   `screenshots/`: Where screenshots captured during test runs are saved.
+*   `assets/`: Contains static image assets.
+*   `package.json`: Defines the project's metadata, dependencies, and `npm` scripts.
+*   `.env.example`: A template showing the required environment variables (like API keys) needed to run the project.
+*   `tsconfig.json`: Configuration file for the TypeScript compiler.
+*   `.gitignore`: A list of files and directories that Git should ignore.
 
-### Installation
-```bash
-npm install
-```
+## How to Run Tests
 
-### CLI Commands
+Testing involves using the AI agent to either `generate` a new test flow or `run` an existing one.
 
-#### 1. Generate a Test
-Generate a Maestro YAML file from a goal without running it.
-```bash
-npm run dev -- generate --appId com.example.app --goal "Login and check profile" --provider gemini
-```
+### Prerequisites:
 
-#### 2. Run a Saved Test
-Execute an existing Maestro YAML test deterministically.
-```bash
-npm run dev -- run --file outputs/generated/com_example_app_login_check_profile.yaml
-```
+1.  **Install Dependencies**: Run `npm install`.
+2.  **Install Tools**: You need the [Maestro CLI](https://maestro.mobile.dev/getting-started/installing-maestro) and [Android Debug Bridge (adb)](https://developer.android.com/tools/adb) installed and available in your system's PATH.
+3.  **Connect Device**: Connect an Android device with USB debugging enabled, or start an Android emulator. Verify with `adb devices`.
+4.  **Set API Keys**: Create a `.env` file in the project root (using `.env.example` as a template) and add the necessary API keys for your chosen AI provider (e.g., `GEMINI_API_KEY=...`).
 
-#### 3. Generate and Run
-The full pipeline: analyze state, generate YAML, and execute immediately.
-```bash
-npm run dev -- generate-and-run --apk ./my-app.apk --goal "Add item to cart" --provider claude
-```
+### Gemini Model Configuration
 
-### Options
-- `--appId <id>`: Android package ID (required if `--apk` is not used).
-- `--apk <path>`: Path to APK (auto-installs if version differs; extracts `appId`).
-- `--goal <text>`: Natural language description of the test goal.
-- `--file <path>`: Path to a Maestro YAML file (for `run` command).
-- `--provider <p>`: AI provider: `gemini` (default), `claude`, or `groq`.
-- `--outputPath <p>`: Custom path to save the generated YAML.
+The Gemini AI agent now dynamically discovers available Gemini models for your API key. This means you do not need to specify `GEMINI_MODEL` or `GEMINI_MODEL_SECONDARY` in your `.env` file. Simply setting `GEMINI_API_KEY` is sufficient. The tool will automatically select a compatible Gemini model that supports content generation.
 
-## 📁 Project Structure
+### Step-by-Step Guide to Run a Test:
 
-- `src/index.ts`: CLI entry point and orchestration.
-- `src/ai.ts`: AI provider implementations, retry logic, and plan validation.
-- `src/maestro.ts`: Maestro YAML generation, ADB bridge, and screenshot logic.
-- `src/utils.ts`: APK metadata extraction and installation utilities.
-- `outputs/`:
-  - `generated/`: Sanitized Maestro YAML files.
-  - `logs/`: Detailed execution logs for every test run.
-  - `screenshots/`: Captured device states and desktop fallbacks.
+**Option 1: Generate a New Test**
+This creates a new test flow from scratch using AI.
 
-## 📄 License
-ISC
+1.  Open your terminal.
+2.  Use the `generate` command with the app's package ID and your goal.
+    ```bash
+    npm run dev -- generate --appId com.example.app --goal "Tap on the login button, then enter username and password"
+    ```
+3.  The tool will analyze the app, call the AI, and save the resulting Maestro YAML file in `outputs/generated/`.
+
+**Option 2: Run an Existing Test**
+This executes a pre-written Maestro file.
+
+1.  Open your terminal.
+2.  Use the `run` command with the path to the `.yaml` file.
+    ```bash
+    npm run dev -- run --file flows/system_settings.yaml
+    ```
+3.  The tool will run the test on your device and show the result. Logs are saved in `outputs/logs/`.
+
+**Option 3: Generate and Run Immediately**
+
+1.  Open your terminal.
+2.  Use the `generate-and-run` command.
+    ```bash
+    npm run dev -- generate-and-run --appId com.example.app --goal "Go to the profile page"
+    ```
+3.  This generates the test and immediately runs it.

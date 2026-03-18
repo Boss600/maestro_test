@@ -146,21 +146,61 @@ export class ClaudePredictor implements AIPredictor {
   }
 }
 
+interface Model {
+  name: string;
+  supportedGenerationMethods: string[];
+}
+
+interface ListModelsResponse {
+  models: Model[];
+}
+
 export class GeminiPredictor implements AIPredictor {
   private genAI: GoogleGenerativeAI
-  private useSecondary = false
+  private apiKey: string
+  private model: string | null = null
 
   constructor() {
     const apiKey = process.env.GEMINI_API_KEY
     if (!apiKey) throw new Error("GEMINI_API_KEY is not set.")
+    this.apiKey = apiKey
     this.genAI = new GoogleGenerativeAI(apiKey)
   }
 
-  async generatePlan(appId: string, goal: string, context: { hierarchy?: string; screenshotPath?: string }): Promise<TestPlan> {
-    const primaryModel = process.env.GEMINI_MODEL || "gemini-1.5-flash-latest"
-    const secondaryModel = process.env.GEMINI_MODEL_SECONDARY || "gemini-1.5-pro-latest"
+  private async findModel(): Promise<string> {
+    if (this.model) return this.model
     
-    const modelName = this.useSecondary ? secondaryModel : primaryModel
+    console.log(fmt.info("Checking for available Gemini models..."))
+    
+    // The google-generative-ai package does not have a listModels method.
+    // We must call the REST API manually.
+    const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${this.apiKey}`
+    const response = await fetch(url)
+    if (!response.ok) {
+      throw new Error(`Failed to list models: ${response.status} ${response.statusText}`)
+    }
+    const data: ListModelsResponse = await response.json()
+    
+    const compatibleModel = data.models.find(m => 
+      m.name.includes("gemini") &&
+      m.supportedGenerationMethods.includes("generateContent")
+    )
+
+    if (!compatibleModel) {
+      throw new Error("No compatible Gemini model found for your API key. Please check your Google AI account for available models.")
+    }
+    
+    // The name is the full resource name, e.g., "models/gemini-pro".
+    // We just need the ID "gemini-pro".
+    const modelId = compatibleModel.name.split("/").pop()!
+    this.model = modelId
+    
+    console.log(fmt.info(`Using model: ${this.model}`))
+    return this.model
+  }
+
+  async generatePlan(appId: string, goal: string, context: { hierarchy?: string; screenshotPath?: string }): Promise<TestPlan> {
+    const modelName = await this.findModel()
     const model = this.genAI.getGenerativeModel({ model: modelName })
     
     const prompt = `Goal: ${goal}\nApp ID: ${appId}\n${context.hierarchy ? `UI Hierarchy:\n${context.hierarchy}` : ""}`
@@ -173,19 +213,8 @@ export class GeminiPredictor implements AIPredictor {
       })
     }
 
-    try {
-      const result = await withRetry(`Gemini (${modelName})`, () => model.generateContent(parts))
-      const raw = result.response.text()
-      return parseAndValidatePlan(raw)
-    } catch (err: any) {
-      const isQuotaError = err.message?.includes("quota") || err.message?.includes("429") || err.status === 429
-      if (!this.useSecondary && isQuotaError) {
-        console.warn(fmt.warn("Gemini primary quota hit. Switching to secondary model..."))
-        this.useSecondary = true
-        return this.generatePlan(appId, goal, context)
-      }
-      throw err
-    }
+    const result = await withRetry(`Gemini (${modelName})`, () => model.generateContent(parts))
+    return parseAndValidatePlan(result.response.text())
   }
 }
 
