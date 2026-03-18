@@ -1,25 +1,46 @@
 export interface Args {
-  app?: string
-  apk?: string
-  test?: string
-  suite?: string
-  model: "claude" | "gemini" | "groq" | "openai"
-  output: string
-  dryRun: boolean
-  noHierarchy: boolean
+  command: "generate" | "run" | "generate-and-run"
+  appId?: string
+  goal?: string
+  file?: string
+  provider: "claude" | "gemini" | "groq"
+  outputPath?: string
   help: boolean
+}
+
+export type StepType = 
+  | "launchApp"
+  | "assertVisible"
+  | "assertNotVisible"
+  | "tapOn"
+  | "inputText"
+  | "eraseText"
+  | "waitFor"
+  | "scroll"
+  | "back"
+  | "pressKey"
+  | "takeScreenshot"
+
+export interface TestStep {
+  type: StepType
+  text?: string
+  id?: string
+  direction?: "UP" | "DOWN" | "LEFT" | "RIGHT"
+  duration?: number
+  key?: string
+}
+
+export interface TestPlan {
+  appId: string
+  testName: string
+  description: string
+  steps: TestStep[]
 }
 
 export interface ExecutionResult {
   passed: boolean
   output: string
   durationMs: number
-  hierarchy?: string
-}
-
-export interface TestReport {
-  passed: boolean
-  healed: boolean
-  durationSec: string
-  analysis: string
+  exitCode?: number
+  filePath?: string
 }

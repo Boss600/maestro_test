@@ -30,90 +30,67 @@ export const fmt = {
 }
 
 export function parseArgs(): Args {
-  const args = process.argv.slice(2)
+  const argv = process.argv.slice(2)
+  const command = argv[0] as any
 
-  if (args.includes("--help") || args.includes("-h")) {
+  if (!command || ["generate", "run", "generate-and-run"].indexOf(command) === -1) {
+    if (argv.includes("--help") || argv.includes("-h")) {
+      printHelp()
+      process.exit(0)
+    }
+    console.error(fmt.fail("Invalid command. Use 'generate', 'run', or 'generate-and-run'."))
     printHelp()
-    process.exit(0)
+    process.exit(1)
   }
 
   const get = (flag: string): string | undefined => {
-    const index = args.findIndex(a => a === flag || a.startsWith(flag + "="))
-    if (index === -1) return undefined
-    
-    const arg = args[index]
-    if (arg.includes("=")) {
-      return arg.split("=").slice(1).join("=")
+    const index = argv.indexOf(flag)
+    if (index !== -1 && index + 1 < argv.length) {
+      return argv[index + 1]
     }
-    
-    const values = []
-    for (let j = index + 1; j < args.length; j++) {
-      if (args[j].startsWith("--")) break
-      values.push(args[j])
-    }
-    return values.length > 0 ? values.join(" ") : undefined
+    return undefined
   }
 
-  const app = get("--app")
-  const apk = get("--apk")
-  const test = get("--test")
-  const suite = get("--suite")
-
-  if (!app && !apk) {
-    console.error(
-      fmt.fail("Missing required argument: --app or --apk is required.\n")
-    )
-    printHelp()
-    process.exit(1)
-  }
-
-  if (!test && !suite) {
-    console.error(
-      fmt.fail("Either --test or --suite must be provided.\n")
-    )
-    printHelp()
-    process.exit(1)
-  }
-
-  const anthropicKey = process.env.ANTHROPIC_API_KEY
-  const geminiKey = process.env.GEMINI_API_KEY
-  const groqKey = process.env.GROQ_API_KEY
-  const openaiKey = process.env.OPENAI_API_KEY
-
-  const defaultModel = anthropicKey ? "claude" : (geminiKey ? "gemini" : (groqKey ? "groq" : (openaiKey ? "openai" : "claude")))
+  const appId = get("--appId")
+  const goal = get("--goal")
+  const file = get("--file")
+  const provider = (get("--provider") || "gemini") as any
+  const outputPath = get("--outputPath")
 
   return {
-    app,
-    apk,
-    test,
-    suite,
-    model: (get("--model") as "claude" | "gemini" | "groq" | "openai") ?? defaultModel,
-    output: get("--output") ?? "outputs/generated/generated.yaml",
-    dryRun: args.includes("--dry-run"),
-    noHierarchy: args.includes("--no-hierarchy"),
-    help: false,
+    command,
+    appId,
+    goal,
+    file,
+    provider,
+    outputPath,
+    help: false
   }
 }
 
 export function printHelp() {
   console.log(`
-${c.bold}${c.magenta}Maestro AI Test Generator${c.reset}
+${c.bold}${c.magenta}Maestro AI Test System${c.reset}
 
 ${c.bold}Usage:${c.reset}
-  npx ts-node src/index.ts [--app <appId> | --apk <path>] [--test "<desc>" | --suite <dir>] [options]
+  npm run dev -- <command> [options]
 
-${c.bold}Required:${c.reset}
-  --app    <appId>        Android package ID (e.g. com.google.android.calculator)
-  --apk    <path>         Path to a local .apk file to install and test
-  --test   "<text>"       Natural language or Gherkin description of the test
-  OR
-  --suite  <dir>          Directory containing .feature or .txt test descriptions
+${c.bold}Commands:${c.reset}
+  generate          Generate a Maestro test from a natural language goal.
+  run               Execute a saved Maestro YAML test.
+  generate-and-run  Generate and then immediately execute the test.
 
 ${c.bold}Options:${c.reset}
-  --model  claude|gemini|groq|openai  AI model to use (default: claude)
-  --output <file>         Output YAML filename (default: outputs/generated/generated.yaml)
-  --dry-run               Generate YAML only, skip execution
-  --no-hierarchy          Skip capturing UI hierarchy (saves tokens)
-  --help                  Show this help message
+  --appId <id>      Android package ID (required for generate).
+  --goal <text>     Natural language description of the test goal (required for generate).
+  --file <path>     Path to the Maestro YAML file (required for run).
+  --provider <p>    AI provider: claude, gemini, or groq (default: gemini).
+  --outputPath <p>  Specific path to save the generated YAML.
+  --help            Show this help message.
+
+${c.bold}Examples:${c.reset}
+  npm run dev -- generate --appId com.example --goal "Login and logout"
+  npm run dev -- run --file generated/test.yaml
+  npm run dev -- generate-and-run --appId com.example --goal "Search for items" --provider claude
 `)
 }
