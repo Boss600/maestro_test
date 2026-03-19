@@ -21,9 +21,14 @@ const ALLOWED_STEP_TYPES: StepType[] = [
 
 const TEST_PLANNER_SYSTEM_PROMPT = `
 You are an expert mobile test engineer specializing in Android testing with Maestro.
-Your goal is to generate a structured mobile test plan based on a natural language goal and the app's current state.
+Your goal is to generate a structured mobile test plan based on a natural language goal and the app's current state (UI hierarchy and screenshot context).
 
-OUTPUT FORMAT:
+### CORE PRINCIPLES:
+1.  **Hierarchy-Groundred Realism**: Your primary goal is to generate a realistic, minimal sequence of steps that a human would perform. Analyze the UI hierarchy and screenshot carefully. Do not hallucinate elements or interactions.
+2.  **Minimal & Robust**: Generate the fewest steps needed for success, but ensure they are logical and robust.
+3.  **Strict Output**: You MUST return ONLY the raw JSON object. No markdown, no explanations.
+
+### OUTPUT FORMAT:
 You MUST return ONLY a JSON object adhering to this schema:
 {
   "appId": "string",
@@ -34,20 +39,44 @@ You MUST return ONLY a JSON object adhering to this schema:
       "type": "launchApp" | "assertVisible" | "assertNotVisible" | "tapOn" | "inputText" | "eraseText" | "waitFor" | "scroll" | "back" | "pressKey" | "takeScreenshot",
       "text": "string (optional)",
       "id": "string (optional)",
-      "direction": "UP" | "DOWN" | "LEFT" | "RIGHT" (optional),
-      "duration": number (optional),
+      "direction": "UP" | "DOWN" | "LEFT" | "RIGHT" (optional)",
+      "duration": number (optional)",
       "key": "string (optional)"
     }
   ]
 }
 
-RULES:
-1. Every test MUST start with "launchApp".
-2. Use accurate selectors (text or id) based on the UI hierarchy if provided.
-3. Be concise. Only include necessary steps to achieve the goal.
-4. Return ONLY raw JSON. No markdown code blocks, no explanations, no extra characters.
-5. All steps MUST use one of the allowed types: ${ALLOWED_STEP_TYPES.join(", ")}.
-`
+### INTERACTION STRATEGY:
+
+#### **CRITICAL OVERRIDE**: The first step of ANY test MUST be 'launchApp'. This overrides any initial blocking UI dismissal or other actions. Always begin with 'launchApp'.
+
+#### 1. Hierarchy-Groundred Element Selection
+When choosing an element to interact with, prioritize using selectors in this order:
+1.  **Resource ID**: Use the 'id' selector if a stable 'resource-id' is available. This is the most robust method.
+2.  **Interactive Controls**: Prefer 'tapOn' for elements that are clearly buttons, input fields, tabs, or navigation components.
+3.  **Visible Text**: Only use 'tapOn' with a 'text' selector as a last resort, and only when the UI strongly implies the text is interactive (e.g., a link or a menu item). For non-interactive text, use 'assertVisible'.
+
+#### 2. Input vs. Tappable Text Distinction
+You must distinguish between different types of text:
+-   **Content/Result Text**: Use 'assertVisible' to verify its presence. Do NOT tap it.
+-   **Placeholder/Label Text**: This text often describes an input field. Tap the *field itself*, not the label.
+-   **Tappable/CTA Text**: Text on buttons or links (e.g., "Sign In," "Next," "Submit"). This is safe to 'tapOn'.
+
+#### 3. Search-First Rule
+For any goal involving searching (e.g., "search for X," "find Y"):
+1.  **Identify Search Field**: First, find an element that is a search input field (e.g., an 'EditText' with 'resource-id' like 'search_src_text', or text like "Search...").
+2.  **Tap the Field**: 'tapOn' the search field you identified.
+3.  **Input Query**: Use 'inputText' to type the search query.
+4.  **Submit**: Use 'pressKey: Enter' or 'tapOn' a visible search/submit button.
+5.  **Verify**: Only after submitting the search should you use 'assertVisible' to check for the expected results on the screen.
+**CRITICAL**: Do NOT 'tapOn' the search query text (e.g., 'tapOn: "OpenAI"') as the first step.
+
+#### 4. Common Mobile UI Patterns
+Before starting the main goal, identify and handle any blocking UI elements:
+-   **Popups (Consent/Privacy/Permissions)**: If a dialog is present, tap the "Accept", "Allow", or "Continue" button to dismiss it.
+-   **Onboarding/Carousels**: If an intro screen is visible, tap "Skip" or "Next" until the main app UI is reachable.
+-   **Login/Signup Forms**: If the goal requires being logged in and a login form is present, complete the necessary 'inputText' and 'tapOn' steps.
+`;
 
 /**
  * Reusable retry logic with support for rate limits, timeouts, and network errors.
@@ -113,36 +142,69 @@ export class ClaudePredictor implements AIPredictor {
   }
 
   async generatePlan(appId: string, goal: string, context: { hierarchy?: string; screenshotPath?: string }): Promise<TestPlan> {
-    const prompt = `Goal: ${goal}\nApp ID: ${appId}\n${context.hierarchy ? `UI Hierarchy:\n${context.hierarchy}` : ""}`
-    const messages: any[] = []
+    const originalPrompt = `Goal: ${goal}
+App ID: ${appId}
+${context.hierarchy ? `UI Hierarchy:
+${context.hierarchy}` : ""}`
+    
+    try {
+      const messages: any[] = []
+      if (context.screenshotPath && fs.existsSync(context.screenshotPath)) {
+        const imageData = fs.readFileSync(context.screenshotPath).toString("base64")
+        messages.push({
+          role: "user",
+          content: [
+            { type: "image", source: { type: "base64", media_type: "image/png", data: imageData } },
+            { type: "text", text: originalPrompt },
+          ],
+        })
+      } else {
+        messages.push({ role: "user", content: originalPrompt })
+      }
 
-    if (context.screenshotPath && fs.existsSync(context.screenshotPath)) {
-      const imageData = fs.readFileSync(context.screenshotPath).toString("base64")
-      messages.push({
-        role: "user",
-        content: [
-          {
-            type: "image",
-            source: { type: "base64", media_type: "image/png", data: imageData },
-          },
-          { type: "text", text: prompt },
-        ],
-      })
-    } else {
-      messages.push({ role: "user", content: prompt })
+      const response = await withRetry("Claude", () =>
+        this.client.messages.create({
+          model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-latest",
+          max_tokens: 2048,
+          system: TEST_PLANNER_SYSTEM_PROMPT,
+          messages,
+        })
+      )
+      const raw = (response.content[0] as any).text
+      return parseAndValidatePlan(raw, goal)
+    } catch (err: any) {
+      if (err.message.includes("Failed to parse or validate AI response")) {
+        console.warn(fmt.warn("Initial AI-generated plan failed validation. Retrying with a stricter prompt..."));
+        const stricterPromptSuffix = "Your previous test plan was invalid or too speculative. Be more conservative, hierarchy-grounded, and prefer canonical controls (search fields, input fields, buttons) over tapping target text directly. Output only valid Maestro YAML.";
+        const stricterPrompt = originalPrompt + stricterPromptSuffix;
+        
+        const messages: any[] = []
+        if (context.screenshotPath && fs.existsSync(context.screenshotPath)) {
+          const imageData = fs.readFileSync(context.screenshotPath).toString("base64")
+          messages.push({
+            role: "user",
+            content: [
+              { type: "image", source: { type: "base64", media_type: "image/png", data: imageData } },
+              { type: "text", text: stricterPrompt },
+            ],
+          })
+        } else {
+          messages.push({ role: "user", content: stricterPrompt })
+        }
+        
+        const finalResponse = await withRetry("Claude (Retry)", () =>
+          this.client.messages.create({
+            model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-latest",
+            max_tokens: 2048,
+            system: TEST_PLANNER_SYSTEM_PROMPT,
+            messages,
+          })
+        )
+        const finalRaw = (finalResponse.content[0] as any).text
+        return parseAndValidatePlan(finalRaw, goal)
+      }
+      throw err;
     }
-
-    const response = await withRetry("Claude", () =>
-      this.client.messages.create({
-        model: process.env.ANTHROPIC_MODEL || "claude-3-5-sonnet-latest",
-        max_tokens: 2048,
-        system: TEST_PLANNER_SYSTEM_PROMPT,
-        messages,
-      })
-    )
-
-    const raw = (response.content[0] as any).text
-    return parseAndValidatePlan(raw)
   }
 }
 
@@ -172,8 +234,6 @@ export class GeminiPredictor implements AIPredictor {
     
     console.log(fmt.info("Checking for available Gemini models..."))
     
-    // The google-generative-ai package does not have a listModels method.
-    // We must call the REST API manually.
     const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${this.apiKey}`
     const response = await fetch(url)
     if (!response.ok) {
@@ -190,8 +250,6 @@ export class GeminiPredictor implements AIPredictor {
       throw new Error("No compatible Gemini model found for your API key. Please check your Google AI account for available models.")
     }
     
-    // The name is the full resource name, e.g., "models/gemini-pro".
-    // We just need the ID "gemini-pro".
     const modelId = compatibleModel.name.split("/").pop()!
     this.model = modelId
     
@@ -200,21 +258,42 @@ export class GeminiPredictor implements AIPredictor {
   }
 
   async generatePlan(appId: string, goal: string, context: { hierarchy?: string; screenshotPath?: string }): Promise<TestPlan> {
-    const modelName = await this.findModel()
-    const model = this.genAI.getGenerativeModel({ model: modelName })
+    const originalPrompt = `Goal: ${goal}
+App ID: ${appId}
+${context.hierarchy ? `UI Hierarchy:
+${context.hierarchy}` : ""}`
     
-    const prompt = `Goal: ${goal}\nApp ID: ${appId}\n${context.hierarchy ? `UI Hierarchy:\n${context.hierarchy}` : ""}`
-    const parts: any[] = [{ text: TEST_PLANNER_SYSTEM_PROMPT }, { text: prompt }]
+    try {
+      const modelName = await this.findModel()
+      const model = this.genAI.getGenerativeModel({ model: modelName })
+      const parts: any[] = [{ text: TEST_PLANNER_SYSTEM_PROMPT }, { text: originalPrompt }]
 
-    if (context.screenshotPath && fs.existsSync(context.screenshotPath)) {
-      const imageData = fs.readFileSync(context.screenshotPath).toString("base64")
-      parts.push({
-        inlineData: { data: imageData, mimeType: "image/png" },
-      })
+      if (context.screenshotPath && fs.existsSync(context.screenshotPath)) {
+        const imageData = fs.readFileSync(context.screenshotPath).toString("base64")
+        parts.push({ inlineData: { data: imageData, mimeType: "image/png" } })
+      }
+
+      const result = await withRetry(`Gemini (${modelName})`, () => model.generateContent(parts))
+      return parseAndValidatePlan(result.response.text(), goal)
+    } catch (err: any) {
+      if (err.message.includes("Failed to parse or validate AI response")) {
+        console.warn(fmt.warn("Initial AI-generated plan failed validation. Retrying with a stricter prompt..."));
+        const stricterPromptSuffix = "Your previous test plan was invalid or too speculative. Be more conservative, hierarchy-grounded, and prefer canonical controls (search fields, input fields, buttons) over tapping target text directly. Output only valid Maestro YAML.";
+        const stricterPrompt = originalPrompt + stricterPromptSuffix;
+        
+        const modelName = await this.findModel()
+        const model = this.genAI.getGenerativeModel({ model: modelName })
+        const parts: any[] = [{ text: TEST_PLANNER_SYSTEM_PROMPT }, { text: stricterPrompt }]
+        if (context.screenshotPath && fs.existsSync(context.screenshotPath)) {
+          const imageData = fs.readFileSync(context.screenshotPath).toString("base64")
+          parts.push({ inlineData: { data: imageData, mimeType: "image/png" } })
+        }
+        
+        const finalResult = await withRetry(`Gemini (${modelName} - Retry)`, () => model.generateContent(parts))
+        return parseAndValidatePlan(finalResult.response.text(), goal)
+      }
+      throw err
     }
-
-    const result = await withRetry(`Gemini (${modelName})`, () => model.generateContent(parts))
-    return parseAndValidatePlan(result.response.text())
   }
 }
 
@@ -227,26 +306,50 @@ export class GroqPredictor implements AIPredictor {
   }
 
   async generatePlan(appId: string, goal: string, context: { hierarchy?: string; screenshotPath?: string }): Promise<TestPlan> {
-    const prompt = `Goal: ${goal}\nApp ID: ${appId}\n${context.hierarchy ? `UI Hierarchy:\n${context.hierarchy}` : ""}`
-    
-    const response = await withRetry("Groq", () =>
-      this.client.chat.completions.create({
-        model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
-        messages: [
-          { role: "system", content: TEST_PLANNER_SYSTEM_PROMPT },
-          { role: "user", content: prompt },
-        ],
-        temperature: 0,
-      })
-    )
-    const raw = response.choices[0]?.message?.content || ""
-    return parseAndValidatePlan(raw)
+    const originalPrompt = `Goal: ${goal}
+App ID: ${appId}
+${context.hierarchy ? `UI Hierarchy:
+${context.hierarchy}` : ""}`
+
+    try {
+      const response = await withRetry("Groq", () =>
+        this.client.chat.completions.create({
+          model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
+          messages: [
+            { role: "system", content: TEST_PLANNER_SYSTEM_PROMPT },
+            { role: "user", content: originalPrompt },
+          ],
+          temperature: 0,
+        })
+      )
+      const raw = response.choices[0]?.message?.content || ""
+      return parseAndValidatePlan(raw, goal)
+    } catch (err: any) {
+      if (err.message.includes("Failed to parse or validate AI response")) {
+        console.warn(fmt.warn("Initial AI-generated plan failed validation. Retrying with a stricter prompt..."));
+        const stricterPromptSuffix = "Your previous test plan was invalid or too speculative. Be more conservative, hierarchy-grounded, and prefer canonical controls (search fields, input fields, buttons) over tapping target text directly. Output only valid Maestro YAML.";
+        const stricterPrompt = originalPrompt + stricterPromptSuffix;
+        
+        const finalResponse = await withRetry("Groq (Retry)", () =>
+          this.client.chat.completions.create({
+            model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
+            messages: [
+              { role: "system", content: TEST_PLANNER_SYSTEM_PROMPT },
+              { role: "user", content: stricterPrompt },
+            ],
+            temperature: 0,
+          })
+        )
+        const finalRaw = finalResponse.choices[0]?.message?.content || ""
+        return parseAndValidatePlan(finalRaw, goal)
+      }
+      throw err;
+    }
   }
 }
 
-function parseAndValidatePlan(raw: string): TestPlan {
+function parseAndValidatePlan(raw: string, goal: string): TestPlan {
   try {
-    // Robust cleaning of markdown and extra characters
     let clean = raw.trim()
     if (clean.includes("```")) {
       const match = clean.match(/```(?:json)?\s*([\s\S]*?)\s*```/)
@@ -259,15 +362,49 @@ function parseAndValidatePlan(raw: string): TestPlan {
       throw new Error("Invalid plan structure: appId, testName, description, and steps are required.")
     }
 
+    if (plan.steps[0].type !== 'launchApp') {
+      throw new Error("Validation failed: A test plan must start with a `launchApp` step.");
+    }
+
     for (const step of plan.steps) {
       if (!ALLOWED_STEP_TYPES.includes(step.type)) {
         throw new Error(`Unsupported step type: ${step.type}. Allowed: ${ALLOWED_STEP_TYPES.join(", ")}`)
+      }
+      if (step.type === 'tapOn' && !step.text && !step.id) {
+        throw new Error("Validation failed: `tapOn` step must have `text` or `id`.");
+      }
+      if (step.type === 'inputText' && typeof step.text !== 'string') {
+        throw new Error("Validation failed: `inputText` step must have a `text` value.");
+      }
+      if (step.type === 'assertVisible' && !step.text && !step.id) {
+          throw new Error("Validation failed: `assertVisible` step must have `text` or `id`.");
+      }
+    }
+
+    const isSearchGoal = /search|find|look up/i.test(goal);
+    if (isSearchGoal) {
+      const inputTextStep = plan.steps.find(s => s.type === 'inputText');
+      
+      if (plan.steps.length > 1 && plan.steps[1].type === 'tapOn' && inputTextStep) {
+        const firstTapText = plan.steps[1].text;
+        if (firstTapText && firstTapText.toLowerCase() === inputTextStep.text?.toLowerCase()) {
+          throw new Error("Validation failed: The first action is `tapOn` with the search query text. The AI should tap a search bar first.");
+        }
+      }
+
+      if (inputTextStep) {
+        const inputTextIndex = plan.steps.findIndex(s => s.type === 'inputText');
+        const hasPrecedingTap = plan.steps.slice(0, inputTextIndex).some(s => s.type === 'tapOn');
+        if (inputTextIndex > 0 && !hasPrecedingTap) {
+            throw new Error("Validation failed: `inputText` is called without a preceding `tapOn` action to focus an input field.");
+        }
       }
     }
 
     return plan
   } catch (err: any) {
-    throw new Error(`Failed to parse AI response: ${err.message}\nRaw response: ${raw}`)
+    throw new Error(`Failed to parse or validate AI response: ${err.message}
+Raw response: ${raw}`)
   }
 }
 
